@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 20
     env:
       CI_IPHONEOS_DEPLOYMENT_TARGET: 18.5
-      CI_SIMULATOR_DESTINATION: platform=iOS Simulator,OS=18.5,name=iPhone 16
+      CI_SIMULATOR_DESTINATION: platform=iOS Simulator,OS=26.2,name=iPhone 17
 
     defaults:
       run:
@@ -25,14 +25,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Show Xcode and simulator environment
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-          xcrun simctl list runtimes
-          xcrun simctl list devicetypes
-          xcrun simctl list devices available
 
       - name: Build app target
         run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET="$CI_IPHONEOS_DEPLOYMENT_TARGET" build
