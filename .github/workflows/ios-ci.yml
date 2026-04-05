@@ -1,0 +1,30 @@
+name: iOS CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ios-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: MIDILooper
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build app target
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO build
+
+      - name: Run unit tests
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "platform=iOS Simulator,name=iPhone 17,OS=26.4" -only-testing:MIDILooperTests test
