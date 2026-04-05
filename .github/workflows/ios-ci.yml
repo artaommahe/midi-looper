@@ -14,6 +14,9 @@ jobs:
   build-and-test:
     runs-on: macos-latest
     timeout-minutes: 20
+    env:
+      CI_IPHONEOS_DEPLOYMENT_TARGET: 18.5
+      CI_SIMULATOR_DESTINATION: platform=iOS Simulator,OS=18.5,name=iPhone 16
 
     defaults:
       run:
@@ -24,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build app target
-        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO build
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET="$CI_IPHONEOS_DEPLOYMENT_TARGET" build
 
       - name: Run unit tests
-        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "platform=iOS Simulator,name=iPhone 17,OS=26.4" -only-testing:MIDILooperTests test
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "$CI_SIMULATOR_DESTINATION" IPHONEOS_DEPLOYMENT_TARGET="$CI_IPHONEOS_DEPLOYMENT_TARGET" -only-testing:MIDILooperTests test
