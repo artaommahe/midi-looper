@@ -1,0 +1,44 @@
+name: iOS CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ios-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      CI_IPHONEOS_DEPLOYMENT_TARGET: 18.5
+      CI_SIMULATOR_RUNTIME: 26.2
+      CI_SIMULATOR_NAME: iPhone 17
+
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build app target
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET="$CI_IPHONEOS_DEPLOYMENT_TARGET" build
+
+      - name: Resolve simulator device
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available | ruby -e 'runtime = ENV.fetch("CI_SIMULATOR_RUNTIME"); name = ENV.fetch("CI_SIMULATOR_NAME"); in_runtime = false; STDIN.each_line do |line|; if line =~ /^-- iOS #{Regexp.escape(runtime)} --$/; in_runtime = true; next; end; if line.start_with?("-- "); in_runtime = false; end; next unless in_runtime; next unless line.include?("#{name} ("); if match = line.match(/\(([0-9A-F-]+)\)/i); puts match[1]; exit 0; end; end; exit 1')
+          if [ -z "$DEVICE_ID" ]; then
+            echo "Unable to resolve simulator for $CI_SIMULATOR_NAME on iOS $CI_SIMULATOR_RUNTIME" >&2
+            exit 1
+          fi
+          xcrun simctl boot "$DEVICE_ID" || true
+          echo "CI_SIMULATOR_DESTINATION=platform=iOS Simulator,id=$DEVICE_ID" >> "$GITHUB_ENV"
+
+      - name: Run unit tests
+        run: xcodebuild -project "MIDILooper.xcodeproj" -scheme "MIDILooper" -destination "$CI_SIMULATOR_DESTINATION" IPHONEOS_DEPLOYMENT_TARGET="$CI_IPHONEOS_DEPLOYMENT_TARGET" -only-testing:MIDILooperTests test
