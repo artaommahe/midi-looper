@@ -17,7 +17,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: MIDILooper
+        working-directory: app
 
     steps:
       - name: Check out repository
