@@ -18,6 +18,18 @@ struct MIDIForwardMessage: Equatable, Sendable {
     let displayText: String
 }
 
+struct MIDIDebugEntry: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let timestamp: String
+    let message: String
+}
+
+enum MIDIConnectionDisplayState {
+    case ok
+    case off
+    case error
+}
+
 enum MIDIMessageParser {
     nonisolated static func forwardedMessages(from bytes: [UInt8]) -> [MIDIForwardMessage] {
         var messages: [MIDIForwardMessage] = []
@@ -119,6 +131,8 @@ enum MIDIMessageParser {
 
 @MainActor
 final class MIDIPOCViewModel: ObservableObject {
+    private static let maxDebugEntries = 40
+
     @Published private(set) var availableInputs: [MIDIEndpointDescriptor] = []
     @Published private(set) var availableOutputs: [MIDIEndpointDescriptor] = []
     @Published private(set) var selectedInputName = "Not connected"
@@ -127,8 +141,37 @@ final class MIDIPOCViewModel: ObservableObject {
     @Published private(set) var outputStatusText = "Disconnected"
     @Published private(set) var lastReceivedEvent = "No MIDI received yet"
     @Published private(set) var lastEventTimestamp = ""
+    @Published private(set) var debugEntries: [MIDIDebugEntry] = []
 
     let preferredDeviceName = "Roland FP-10"
+
+    var isConnectionHealthy: Bool {
+        isConnectedStatus(inputStatusText) && isConnectedStatus(outputStatusText)
+    }
+
+    var connectionDisplayState: MIDIConnectionDisplayState {
+        if hasConnectionError {
+            return .error
+        }
+
+        if isConnectionHealthy {
+            return .ok
+        }
+
+        return .off
+    }
+
+    private var hasConnectionError: Bool {
+        let combinedStatus = "\(inputStatusText) \(outputStatusText)"
+        return combinedStatus.localizedCaseInsensitiveContains("failed")
+            || combinedStatus.localizedCaseInsensitiveContains("unavailable")
+            || combinedStatus.localizedCaseInsensitiveContains("error")
+    }
+
+    private func isConnectedStatus(_ status: String) -> Bool {
+        let normalizedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedStatus == "connected" || normalizedStatus == "connected to fp-10"
+    }
 
     nonisolated(unsafe) private var client = MIDIClientRef()
     nonisolated(unsafe) private var inputPort = MIDIPortRef()
@@ -145,11 +188,13 @@ final class MIDIPOCViewModel: ObservableObject {
     }()
 
     init() {
+        appendDebugLog("MIDI debug log started")
         setupMIDI()
         refreshEndpoints()
     }
 
     func refreshEndpoints() {
+        appendDebugLog("Refreshing MIDI endpoints")
         let inputs = enumerateEndpoints(count: MIDIGetNumberOfSources(), endpointAtIndex: MIDIGetSource)
         let outputs = enumerateEndpoints(count: MIDIGetNumberOfDestinations(), endpointAtIndex: MIDIGetDestination)
 
@@ -177,8 +222,11 @@ final class MIDIPOCViewModel: ObservableObject {
             logger.error("Failed to create MIDI client: \(clientStatus)")
             inputStatusText = "CoreMIDI unavailable"
             outputStatusText = "CoreMIDI unavailable"
+            appendDebugLog("Failed to create MIDI client: \(clientStatus)")
             return
         }
+
+        appendDebugLog("Created MIDI client")
 
         let inputStatus = MIDIInputPortCreateWithBlock(createdClient, "MIDILooper Input" as CFString, &createdInputPort) { [weak self] packetList, _ in
             self?.handlePacketList(packetList)
@@ -189,8 +237,11 @@ final class MIDIPOCViewModel: ObservableObject {
             inputStatusText = "Input port failed"
             outputStatusText = "Input port failed"
             client = createdClient
+            appendDebugLog("Failed to create MIDI input port: \(inputStatus)")
             return
         }
+
+        appendDebugLog("Created MIDI input port")
 
         let outputStatus = MIDIOutputPortCreate(createdClient, "MIDILooper Output" as CFString, &createdOutputPort)
         guard outputStatus == noErr else {
@@ -199,12 +250,14 @@ final class MIDIPOCViewModel: ObservableObject {
             outputStatusText = "Output port failed"
             client = createdClient
             inputPort = createdInputPort
+            appendDebugLog("Failed to create MIDI output port: \(outputStatus)")
             return
         }
 
         client = createdClient
         inputPort = createdInputPort
         outputPort = createdOutputPort
+        appendDebugLog("Created MIDI output port")
     }
 
     private func enumerateEndpoints(
@@ -240,12 +293,14 @@ final class MIDIPOCViewModel: ObservableObject {
 
         if selectedSource != 0, selectedSource != preferredInput?.ref {
             MIDIPortDisconnectSource(inputPort, selectedSource)
+            appendDebugLog("Disconnected MIDI input: \(selectedInputName)")
             selectedSource = 0
         }
 
         guard let preferredInput else {
             selectedInputName = "Not connected"
             inputStatusText = "Disconnected"
+            appendDebugLog("No MIDI input available")
             return
         }
 
@@ -255,10 +310,12 @@ final class MIDIPOCViewModel: ObservableObject {
                 logger.error("Failed to connect MIDI input: \(status)")
                 selectedInputName = preferredInput.name
                 inputStatusText = "Connect failed"
+                appendDebugLog("Failed to connect MIDI input \(preferredInput.name): \(status)")
                 return
             }
 
             selectedSource = preferredInput.ref
+            appendDebugLog("Connected MIDI input: \(preferredInput.name)")
         }
 
         selectedInputName = preferredInput.name
@@ -267,15 +324,24 @@ final class MIDIPOCViewModel: ObservableObject {
 
     private func connectPreferredOutput(from outputs: [MIDIEndpointDescriptor]) {
         guard let preferredOutput = preferredEndpoint(in: outputs) else {
+            let wasConnected = selectedDestination != 0
             selectedDestination = 0
             selectedOutputName = "Not connected"
             outputStatusText = "Disconnected"
+            if wasConnected {
+                appendDebugLog("No MIDI output available")
+            }
             return
         }
 
+        let previousOutputName = selectedOutputName
+        let outputChanged = selectedDestination != preferredOutput.ref || previousOutputName != preferredOutput.name
         selectedDestination = preferredOutput.ref
         selectedOutputName = preferredOutput.name
         outputStatusText = preferredOutput.isPreferred ? "Connected to FP-10" : "Connected"
+        if outputChanged {
+            appendDebugLog("Selected MIDI output: \(preferredOutput.name)")
+        }
     }
 
     private func preferredEndpoint(in endpoints: [MIDIEndpointDescriptor]) -> MIDIEndpointDescriptor? {
@@ -379,6 +445,7 @@ final class MIDIPOCViewModel: ObservableObject {
         if status != noErr {
             Task { @MainActor [weak self] in
                 self?.outputStatusText = "Send failed"
+                self?.appendDebugLog("MIDI send failed: \(status)")
             }
         }
     }
@@ -388,6 +455,19 @@ final class MIDIPOCViewModel: ObservableObject {
             guard let self else { return }
             lastReceivedEvent = text
             lastEventTimestamp = timestampFormatter.string(from: Date())
+            appendDebugLog("RX \(text)")
+        }
+    }
+
+    private func appendDebugLog(_ message: String) {
+        let entry = MIDIDebugEntry(
+            timestamp: timestampFormatter.string(from: Date()),
+            message: message
+        )
+        debugEntries.insert(entry, at: 0)
+
+        if debugEntries.count > Self.maxDebugEntries {
+            debugEntries.removeLast(debugEntries.count - Self.maxDebugEntries)
         }
     }
 }
