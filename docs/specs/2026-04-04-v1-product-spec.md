@@ -1,6 +1,8 @@
 # MIDI Looper iPhone App V1 Product Spec
 
-Related document: `docs/architecture/2026-04-04-v1-architecture.md`
+Related documents:
+- `docs/architecture/2026-04-04-v1-architecture.md`
+- `docs/specs/2026-04-06-v1-ui-wireframe.md`
 
 ## Context
 
@@ -117,6 +119,8 @@ All sound should come from the FP-10, not from the iPhone.
 ## UI Concept
 
 The app should resemble a live looper pedalboard.
+
+See `docs/specs/2026-04-06-v1-ui-wireframe.md` for the agreed v1 main-screen wireframe and control layout.
 
 ### Main Screen
 
