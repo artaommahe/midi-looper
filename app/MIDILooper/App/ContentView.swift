@@ -1,34 +1,64 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var midi = MIDIPOCViewModel()
+
     @State private var isTransportRunning = true
-    @State private var midiConnected = true
     @State private var bpmText = "120 BPM"
     @State private var activeBeat = 0
     @State private var tracks = TrackPanelState.mockTracks
+    @State private var showsMIDIDebugOverlay = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let contentHeight = proxy.size.height - 28
-            let trackHeight = max(120, (contentHeight - 88) / 4)
+        ZStack(alignment: .top) {
+            GeometryReader { proxy in
+                let contentHeight = proxy.size.height - 28
+                let trackHeight = max(120, (contentHeight - 88) / 4)
 
-            VStack(spacing: 12) {
-                header
+                VStack(spacing: 12) {
+                    header
 
-                VStack(spacing: 10) {
-                    ForEach($tracks) { $track in
-                        TrackPanel(
-                            track: $track,
-                            height: trackHeight
-                        )
+                    VStack(spacing: 10) {
+                        ForEach($tracks) { $track in
+                            TrackPanel(
+                                track: $track,
+                                height: trackHeight
+                            )
+                        }
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(Color(.systemGroupedBackground))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(Color(.systemGroupedBackground))
+
+            if showsMIDIDebugOverlay {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showsMIDIDebugOverlay = false
+                    }
+
+                MIDIDebugOverlay(
+                    entries: midi.debugEntries,
+                    inputStatusText: midi.inputStatusText,
+                    outputStatusText: midi.outputStatusText,
+                    selectedInputName: midi.selectedInputName,
+                    selectedOutputName: midi.selectedOutputName,
+                    lastReceivedEvent: midi.lastReceivedEvent,
+                    lastEventTimestamp: midi.lastEventTimestamp,
+                    onClose: {
+                        showsMIDIDebugOverlay = false
+                    }
+                )
+                .padding(.top, 76)
+                .padding(.horizontal, 16)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(1)
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: showsMIDIDebugOverlay)
     }
 
     private var header: some View {
@@ -39,12 +69,17 @@ struct ContentView: View {
             .buttonStyle(HeaderButtonStyle(isRunning: isTransportRunning))
             .layoutPriority(1)
 
-            Text(midiConnected ? "MIDI OK" : "MIDI OFF")
-                .font(.headline.monospaced())
-                .foregroundStyle(midiConnected ? Color.green : Color.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .frame(maxWidth: .infinity, alignment: .center)
+            Button {
+                showsMIDIDebugOverlay.toggle()
+            } label: {
+                Text(midiStatusTitle)
+                    .font(.headline.monospaced())
+                    .foregroundStyle(midiStatusColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .buttonStyle(.plain)
 
             Text(bpmText)
                 .font(.headline.monospaced())
@@ -64,6 +99,95 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
         )
+    }
+
+    private var midiStatusTitle: String {
+        midi.isConnectionHealthy ? "MIDI OK" : "MIDI OFF"
+    }
+
+    private var midiStatusColor: Color {
+        midi.isConnectionHealthy ? .green : .secondary
+    }
+}
+
+private struct MIDIDebugOverlay: View {
+    let entries: [MIDIDebugEntry]
+    let inputStatusText: String
+    let outputStatusText: String
+    let selectedInputName: String
+    let selectedOutputName: String
+    let lastReceivedEvent: String
+    let lastEventTimestamp: String
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("MIDI DEBUG")
+                    .font(.headline.weight(.semibold).monospaced())
+
+                Spacer()
+
+                Button("CLOSE", action: onClose)
+                    .font(.subheadline.weight(.semibold).monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                debugRow("INPUT", value: "\(inputStatusText) | \(selectedInputName)")
+                debugRow("OUTPUT", value: "\(outputStatusText) | \(selectedOutputName)")
+                debugRow("LAST", value: lastEventLine)
+            }
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if entries.isEmpty {
+                        Text("No MIDI debug events yet")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(entries) { entry in
+                            Text("[\(entry.timestamp)] \(entry.message)")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .font(.caption.monospaced())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 240)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color(.separator), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 10)
+    }
+
+    private var lastEventLine: String {
+        if lastEventTimestamp.isEmpty {
+            return lastReceivedEvent
+        }
+
+        return "\(lastEventTimestamp) | \(lastReceivedEvent)"
+    }
+
+    private func debugRow(_ label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+
+            Text(value)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.caption.monospaced())
     }
 }
 
