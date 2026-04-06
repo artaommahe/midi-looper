@@ -24,6 +24,12 @@ struct MIDIDebugEntry: Identifiable, Equatable, Sendable {
     let message: String
 }
 
+enum MIDIConnectionDisplayState {
+    case ok
+    case off
+    case error
+}
+
 enum MIDIMessageParser {
     nonisolated static func forwardedMessages(from bytes: [UInt8]) -> [MIDIForwardMessage] {
         var messages: [MIDIForwardMessage] = []
@@ -140,8 +146,31 @@ final class MIDIPOCViewModel: ObservableObject {
     let preferredDeviceName = "Roland FP-10"
 
     var isConnectionHealthy: Bool {
-        inputStatusText.localizedCaseInsensitiveContains("connected")
-            && outputStatusText.localizedCaseInsensitiveContains("connected")
+        isConnectedStatus(inputStatusText) && isConnectedStatus(outputStatusText)
+    }
+
+    var connectionDisplayState: MIDIConnectionDisplayState {
+        if hasConnectionError {
+            return .error
+        }
+
+        if isConnectionHealthy {
+            return .ok
+        }
+
+        return .off
+    }
+
+    private var hasConnectionError: Bool {
+        let combinedStatus = "\(inputStatusText) \(outputStatusText)"
+        return combinedStatus.localizedCaseInsensitiveContains("failed")
+            || combinedStatus.localizedCaseInsensitiveContains("unavailable")
+            || combinedStatus.localizedCaseInsensitiveContains("error")
+    }
+
+    private func isConnectedStatus(_ status: String) -> Bool {
+        let normalizedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedStatus == "connected" || normalizedStatus == "connected to fp-10"
     }
 
     nonisolated(unsafe) private var client = MIDIClientRef()

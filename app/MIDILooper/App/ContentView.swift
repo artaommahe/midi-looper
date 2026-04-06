@@ -62,31 +62,38 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 0) {
             Button(isTransportRunning ? "STOP" : "PLAY") {
                 isTransportRunning.toggle()
             }
             .buttonStyle(HeaderButtonStyle(isRunning: isTransportRunning))
-            .layoutPriority(1)
+            .frame(width: 92)
+
+            Spacer(minLength: 10)
 
             Button {
                 showsMIDIDebugOverlay.toggle()
             } label: {
                 Text(midiStatusTitle)
-                    .font(.headline.monospaced())
+                    .font(.subheadline.weight(.semibold).monospaced())
                     .foregroundStyle(midiStatusColor)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
             .buttonStyle(.plain)
+            .frame(width: 68)
+
+            Spacer(minLength: 10)
 
             Text(bpmText)
-                .font(.headline.monospaced())
+                .font(.subheadline.weight(.semibold).monospaced())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-                .layoutPriority(1)
+                .frame(width: 74, alignment: .center)
+
+            Spacer(minLength: 10)
 
             BeatIndicator(activeBeat: activeBeat)
                 .onTapGesture {
@@ -95,6 +102,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
@@ -102,11 +110,25 @@ struct ContentView: View {
     }
 
     private var midiStatusTitle: String {
-        midi.isConnectionHealthy ? "MIDI OK" : "MIDI OFF"
+        switch midi.connectionDisplayState {
+        case .ok:
+            return "MIDI OK"
+        case .off:
+            return "MIDI OFF"
+        case .error:
+            return "MIDI ERR"
+        }
     }
 
     private var midiStatusColor: Color {
-        midi.isConnectionHealthy ? .green : .secondary
+        switch midi.connectionDisplayState {
+        case .ok:
+            return .green
+        case .off:
+            return .secondary
+        case .error:
+            return .red
+        }
     }
 }
 
@@ -289,15 +311,15 @@ private struct BeatIndicator: View {
             ForEach(0..<4, id: \.self) { index in
                 Circle()
                     .fill(index == activeBeat ? Color.primary : Color.clear)
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
                     .overlay(
                         Circle()
                             .stroke(Color.primary, lineWidth: 1)
                     )
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 9)
         .fixedSize()
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -315,9 +337,9 @@ private struct HeaderButtonStyle: ButtonStyle {
         configuration.label
             .font(.headline.monospaced())
             .foregroundStyle(foregroundColor)
-            .frame(minWidth: 84)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(backgroundColor)
