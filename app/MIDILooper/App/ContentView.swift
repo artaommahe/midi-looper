@@ -3,10 +3,6 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var midi = MIDIPOCViewModel()
 
-    @State private var isTransportRunning = true
-    @State private var bpmText = "120 BPM"
-    @State private var activeBeat = 0
-    @State private var tracks = TrackPanelState.mockTracks
     @State private var showsMIDIDebugOverlay = false
 
     var body: some View {
@@ -19,10 +15,18 @@ struct ContentView: View {
                     header
 
                     VStack(spacing: 10) {
-                        ForEach($tracks) { $track in
+                        ForEach(trackStates) { track in
                             TrackPanel(
-                                track: $track,
-                                height: trackHeight
+                                track: track,
+                                height: trackHeight,
+                                onRecord: {
+                                    handleRecordTap(for: track.id)
+                                },
+                                onMute: {},
+                                onSolo: {},
+                                onClear: {
+                                    handleClearTap(for: track.id)
+                                }
                             )
                         }
                     }
@@ -44,10 +48,14 @@ struct ContentView: View {
                     entries: midi.debugEntries,
                     inputStatusText: midi.inputStatusText,
                     outputStatusText: midi.outputStatusText,
+                    liveThruEnabled: midi.liveThruEnabled,
                     selectedInputName: midi.selectedInputName,
                     selectedOutputName: midi.selectedOutputName,
                     lastReceivedEvent: midi.lastReceivedEvent,
                     lastEventTimestamp: midi.lastEventTimestamp,
+                    onToggleLiveThru: {
+                        midi.toggleLiveThru()
+                    },
                     onClose: {
                         showsMIDIDebugOverlay = false
                     }
@@ -63,10 +71,10 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 0) {
-            Button(isTransportRunning ? "STOP" : "PLAY") {
-                isTransportRunning.toggle()
+            Button(midi.looperSnapshot.transportIsRunning ? "STOP" : "PLAY") {
+                midi.toggleTransport()
             }
-            .buttonStyle(HeaderButtonStyle(isRunning: isTransportRunning))
+            .buttonStyle(HeaderButtonStyle(isRunning: midi.looperSnapshot.transportIsRunning))
             .frame(width: 92)
 
             Spacer(minLength: 10)
@@ -95,10 +103,7 @@ struct ContentView: View {
 
             Spacer(minLength: 10)
 
-            BeatIndicator(activeBeat: activeBeat)
-                .onTapGesture {
-                    activeBeat = (activeBeat + 1) % 4
-                }
+            BeatIndicator(activeBeat: midi.looperSnapshot.activeBeat)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -130,16 +135,81 @@ struct ContentView: View {
             return .red
         }
     }
+
+    private var bpmText: String {
+        guard let bpm = midi.looperSnapshot.bpm else {
+            return "-- BPM"
+        }
+
+        return "\(bpm) BPM"
+    }
+
+    private var trackStates: [TrackPanelState] {
+        [trackOneState] + TrackPanelState.placeholderTracks
+    }
+
+    private var trackOneState: TrackPanelState {
+        let snapshot = midi.looperSnapshot
+
+        return TrackPanelState(
+            id: 1,
+            title: "TRK 1",
+            primaryStateLabel: snapshot.trackState.rawValue,
+            queueLabel: "[Q: \(snapshot.queuedAction.rawValue)]",
+            stateColor: stateColor(for: snapshot.trackState),
+            recordButtonTitle: snapshot.recordButtonTitle,
+            recordButtonTint: recordTint(for: snapshot.trackState),
+            isRecordActionActive: snapshot.trackState == .armed || snapshot.trackState == .recording,
+            recordButtonEnabled: snapshot.recordButtonEnabled,
+            muteButtonEnabled: false,
+            soloButtonEnabled: false,
+            clearButtonEnabled: snapshot.clearButtonEnabled
+        )
+    }
+
+    private func stateColor(for state: LooperTrackPrimaryState) -> Color {
+        switch state {
+        case .empty, .playing:
+            return .primary
+        case .armed:
+            return .orange
+        case .recording:
+            return .red
+        }
+    }
+
+    private func recordTint(for state: LooperTrackPrimaryState) -> Color {
+        switch state {
+        case .empty, .playing:
+            return .primary
+        case .armed:
+            return .orange
+        case .recording:
+            return .red
+        }
+    }
+
+    private func handleRecordTap(for trackID: Int) {
+        guard trackID == 1 else { return }
+        midi.handleTrackOneRecordButton()
+    }
+
+    private func handleClearTap(for trackID: Int) {
+        guard trackID == 1 else { return }
+        midi.handleTrackOneClearButton()
+    }
 }
 
 private struct MIDIDebugOverlay: View {
     let entries: [MIDIDebugEntry]
     let inputStatusText: String
     let outputStatusText: String
+    let liveThruEnabled: Bool
     let selectedInputName: String
     let selectedOutputName: String
     let lastReceivedEvent: String
     let lastEventTimestamp: String
+    let onToggleLiveThru: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -158,8 +228,12 @@ private struct MIDIDebugOverlay: View {
             VStack(alignment: .leading, spacing: 6) {
                 debugRow("INPUT", value: "\(inputStatusText) | \(selectedInputName)")
                 debugRow("OUTPUT", value: "\(outputStatusText) | \(selectedOutputName)")
+                debugRow("THRU", value: liveThruEnabled ? "Enabled" : "Disabled")
                 debugRow("LAST", value: lastEventLine)
             }
+
+            Button(liveThruEnabled ? "LIVE THRU ON" : "LIVE THRU OFF", action: onToggleLiveThru)
+                .buttonStyle(.bordered)
 
             Divider()
 
@@ -214,9 +288,12 @@ private struct MIDIDebugOverlay: View {
 }
 
 private struct TrackPanel: View {
-    @Binding var track: TrackPanelState
-
+    let track: TrackPanelState
     let height: CGFloat
+    let onRecord: () -> Void
+    let onMute: () -> Void
+    let onSolo: () -> Void
+    let onClear: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -255,37 +332,39 @@ private struct TrackPanel: View {
 
                 HStack(spacing: spacing) {
                     Button(track.recordButtonTitle) {
-                        track.advanceRecordState()
+                        onRecord()
                     }
                     .buttonStyle(
                         TrackButtonStyle(
-                            isEnabled: true,
+                            isEnabled: track.recordButtonEnabled,
                             tint: track.recordButtonTint,
                             isActive: track.isRecordActionActive
                         )
                     )
                     .frame(width: recordWidth)
+                    .disabled(!track.recordButtonEnabled)
 
                     Button("MUTE") {
-                        track.queueAction = track.queueAction == .mute ? .none : .mute
+                        onMute()
                     }
-                    .buttonStyle(TrackButtonStyle(isEnabled: track.canQueueMuteOrSolo))
+                    .buttonStyle(TrackButtonStyle(isEnabled: track.muteButtonEnabled))
                     .frame(width: secondaryWidth)
-                    .disabled(!track.canQueueMuteOrSolo)
+                    .disabled(!track.muteButtonEnabled)
 
                     Button("SOLO") {
-                        track.queueAction = track.queueAction == .solo ? .none : .solo
+                        onSolo()
                     }
-                    .buttonStyle(TrackButtonStyle(isEnabled: track.canQueueMuteOrSolo))
+                    .buttonStyle(TrackButtonStyle(isEnabled: track.soloButtonEnabled))
                     .frame(width: secondaryWidth)
-                    .disabled(!track.canQueueMuteOrSolo)
+                    .disabled(!track.soloButtonEnabled)
 
                     Button("CLEAR") {
-                        track.queueAction = track.queueAction == .clear ? .none : .clear
+                        onClear()
                     }
-                    .buttonStyle(TrackButtonStyle(isDestructive: true))
+                    .buttonStyle(TrackButtonStyle(isEnabled: track.clearButtonEnabled, isDestructive: true))
                     .frame(width: clearWidth)
                     .padding(.leading, clearGap)
+                    .disabled(!track.clearButtonEnabled)
                 }
             }
             .frame(maxHeight: .infinity)
@@ -445,142 +524,63 @@ private struct TrackButtonStyle: ButtonStyle {
 private struct TrackPanelState: Identifiable {
     let id: Int
     let title: String
-    var primaryState: PrimaryTrackState
-    var overlay: TrackOverlay?
-    var queueAction: QueueAction
+    let primaryStateLabel: String
+    let queueLabel: String
+    let stateColor: Color
+    let recordButtonTitle: String
+    let recordButtonTint: Color
+    let isRecordActionActive: Bool
+    let recordButtonEnabled: Bool
+    let muteButtonEnabled: Bool
+    let soloButtonEnabled: Bool
+    let clearButtonEnabled: Bool
 
-    var stateLabel: String {
-        if let overlay {
-            return "\(primaryState.rawValue) (\(overlay.rawValue))"
-        }
+    var stateLabel: String { primaryStateLabel }
 
-        return primaryState.rawValue
-    }
-
-    var queueLabel: String {
-        "[Q: \(queueAction.rawValue)]"
-    }
-
-    var canQueueMuteOrSolo: Bool {
-        primaryState != .empty
-    }
-
-    var isRecordActionActive: Bool {
-        primaryState == .armed || primaryState == .recording || primaryState == .overdub
-    }
-
-    var recordButtonTitle: String {
-        switch primaryState {
-        case .armed:
-            return "ARMED"
-        case .recording:
-            return "REC"
-        case .overdub:
-            return "OD"
-        case .empty, .playing:
-            return "REC /\nOD"
-        }
-    }
-
-    var recordButtonTint: Color {
-        switch primaryState {
-        case .armed:
-            return .orange
-        case .recording:
-            return .red
-        case .overdub:
-            return .orange
-        case .empty, .playing:
-            return .primary
-        }
-    }
-
-    var stateColor: Color {
-        switch primaryState {
-        case .recording:
-            return .red
-        case .overdub:
-            return .orange
-        case .armed:
-            return .orange
-        case .empty, .playing:
-            return .primary
-        }
-    }
-
-    mutating func advanceRecordState() {
-        switch primaryState {
-        case .empty:
-            primaryState = .armed
-            overlay = nil
-            queueAction = .none
-        case .armed:
-            primaryState = .recording
-            queueAction = .none
-        case .recording:
-            primaryState = .playing
-            queueAction = .none
-        case .playing:
-            primaryState = .overdub
-            queueAction = .none
-        case .overdub:
-            primaryState = .playing
-            queueAction = .none
-        }
-    }
-
-    static let mockTracks: [TrackPanelState] = [
-        TrackPanelState(
-            id: 1,
-            title: "TRK 1",
-            primaryState: .playing,
-            overlay: nil,
-            queueAction: .mute
-        ),
+    static let placeholderTracks: [TrackPanelState] = [
         TrackPanelState(
             id: 2,
             title: "TRK 2",
-            primaryState: .empty,
-            overlay: nil,
-            queueAction: .none
+            primaryStateLabel: "EMPTY",
+            queueLabel: "[Q: --]",
+            stateColor: .primary,
+            recordButtonTitle: "REC /\nOD",
+            recordButtonTint: .primary,
+            isRecordActionActive: false,
+            recordButtonEnabled: false,
+            muteButtonEnabled: false,
+            soloButtonEnabled: false,
+            clearButtonEnabled: false
         ),
         TrackPanelState(
             id: 3,
             title: "TRK 3",
-            primaryState: .recording,
-            overlay: nil,
-            queueAction: .none
+            primaryStateLabel: "EMPTY",
+            queueLabel: "[Q: --]",
+            stateColor: .primary,
+            recordButtonTitle: "REC /\nOD",
+            recordButtonTint: .primary,
+            isRecordActionActive: false,
+            recordButtonEnabled: false,
+            muteButtonEnabled: false,
+            soloButtonEnabled: false,
+            clearButtonEnabled: false
         ),
         TrackPanelState(
             id: 4,
             title: "TRK 4",
-            primaryState: .playing,
-            overlay: .solo,
-            queueAction: .none
+            primaryStateLabel: "EMPTY",
+            queueLabel: "[Q: --]",
+            stateColor: .primary,
+            recordButtonTitle: "REC /\nOD",
+            recordButtonTint: .primary,
+            isRecordActionActive: false,
+            recordButtonEnabled: false,
+            muteButtonEnabled: false,
+            soloButtonEnabled: false,
+            clearButtonEnabled: false
         )
     ]
-}
-
-private enum PrimaryTrackState: String {
-    case empty = "EMPTY"
-    case armed = "ARMED"
-    case recording = "RECORDING"
-    case playing = "PLAYING"
-    case overdub = "OVERDUB"
-}
-
-private enum TrackOverlay: String {
-    case muted = "MUTED"
-    case solo = "SOLO"
-}
-
-private enum QueueAction: String {
-    case none = "--"
-    case mute = "MUTE"
-    case solo = "SOLO"
-    case clear = "CLEAR"
-    case record = "REC"
-    case overdub = "OD"
 }
 
 #Preview {

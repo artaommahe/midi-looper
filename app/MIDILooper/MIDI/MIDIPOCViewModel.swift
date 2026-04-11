@@ -142,6 +142,8 @@ final class MIDIPOCViewModel: ObservableObject {
     @Published private(set) var lastReceivedEvent = "No MIDI received yet"
     @Published private(set) var lastEventTimestamp = ""
     @Published private(set) var debugEntries: [MIDIDebugEntry] = []
+    @Published private(set) var looperSnapshot = SingleTrackLooperSnapshot.empty
+    @Published private(set) var liveThruEnabled = false
 
     let preferredDeviceName = "Roland FP-10"
 
@@ -178,6 +180,10 @@ final class MIDIPOCViewModel: ObservableObject {
     nonisolated(unsafe) private var outputPort = MIDIPortRef()
     nonisolated(unsafe) private var selectedSource = MIDIEndpointRef()
     nonisolated(unsafe) private var selectedDestination = MIDIEndpointRef()
+    nonisolated(unsafe) private let engineQueue = DispatchQueue(label: "com.mkraai.MIDILooper.LooperEngine")
+    nonisolated(unsafe) private var looperEngine = SingleTrackLooperEngine()
+    nonisolated(unsafe) private var playbackTimer: DispatchSourceTimer?
+    nonisolated(unsafe) private var liveThruEnabledValue = false
 
     private let logger = Logger(subsystem: "com.mkraai.MIDILooper", category: "CoreMIDI")
     private let timestampFormatter: DateFormatter = {
@@ -191,6 +197,13 @@ final class MIDIPOCViewModel: ObservableObject {
         appendDebugLog("MIDI debug log started")
         setupMIDI()
         refreshEndpoints()
+        startPlaybackTimer()
+        publishLooperSnapshot(currentTime())
+    }
+
+    deinit {
+        playbackTimer?.setEventHandler {}
+        playbackTimer?.cancel()
     }
 
     func refreshEndpoints() {
@@ -203,6 +216,42 @@ final class MIDIPOCViewModel: ObservableObject {
 
         connectPreferredInput(from: inputs)
         connectPreferredOutput(from: outputs)
+    }
+
+    func toggleTransport() {
+        let now = currentTime()
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            let output = self.looperEngine.toggleTransport(at: now)
+            self.forward(rawMessages: output)
+            self.publishLooperSnapshot(now)
+        }
+    }
+
+    func handleTrackOneRecordButton() {
+        let now = currentTime()
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            let output = self.looperEngine.handleRecordButton(at: now)
+            self.forward(rawMessages: output)
+            self.publishLooperSnapshot(now)
+        }
+    }
+
+    func handleTrackOneClearButton() {
+        let now = currentTime()
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            let output = self.looperEngine.handleClearButton(at: now)
+            self.forward(rawMessages: output)
+            self.publishLooperSnapshot(now)
+        }
+    }
+
+    func toggleLiveThru() {
+        liveThruEnabled.toggle()
+        liveThruEnabledValue = liveThruEnabled
+        appendDebugLog("Live thru \(liveThruEnabled ? "enabled" : "disabled")")
     }
 
     private func setupMIDI() {
@@ -325,6 +374,9 @@ final class MIDIPOCViewModel: ObservableObject {
     private func connectPreferredOutput(from outputs: [MIDIEndpointDescriptor]) {
         guard let preferredOutput = preferredEndpoint(in: outputs) else {
             let wasConnected = selectedDestination != 0
+            if wasConnected {
+                sendLocalControl(enabled: true, to: selectedDestination)
+            }
             selectedDestination = 0
             selectedOutputName = "Not connected"
             outputStatusText = "Disconnected"
@@ -336,11 +388,18 @@ final class MIDIPOCViewModel: ObservableObject {
 
         let previousOutputName = selectedOutputName
         let outputChanged = selectedDestination != preferredOutput.ref || previousOutputName != preferredOutput.name
+        if outputChanged, selectedDestination != 0 {
+            sendLocalControl(enabled: true, to: selectedDestination)
+        }
         selectedDestination = preferredOutput.ref
         selectedOutputName = preferredOutput.name
         outputStatusText = preferredOutput.isPreferred ? "Connected to FP-10" : "Connected"
         if outputChanged {
             appendDebugLog("Selected MIDI output: \(preferredOutput.name)")
+            if preferredOutput.isPreferred {
+                sendLocalControl(enabled: false, to: preferredOutput.ref)
+                appendDebugLog("Sent Local Control Off to \(preferredOutput.name)")
+            }
         }
     }
 
@@ -403,8 +462,18 @@ final class MIDIPOCViewModel: ObservableObject {
 
             let messages = MIDIMessageParser.forwardedMessages(from: packetBytes)
             if !messages.isEmpty {
-                forward(messages: messages)
+                if liveThruEnabledValue {
+                    forward(messages: messages)
+                }
                 updateLastReceivedEvent(messages.last?.displayText ?? "")
+
+                let rawMessages = messages.map(\.rawBytes)
+                let now = currentTime()
+                engineQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.looperEngine.handleIncomingMessages(rawMessages, at: now)
+                    self.publishLooperSnapshot(now)
+                }
             }
 
             if packetIndex < packetListValue.numPackets - 1 {
@@ -414,9 +483,14 @@ final class MIDIPOCViewModel: ObservableObject {
     }
 
     nonisolated private func forward(messages: [MIDIForwardMessage]) {
-        guard outputPort != 0, selectedDestination != 0 else { return }
+        forward(rawMessages: messages.map(\.rawBytes))
+    }
 
-        let bytes = messages.flatMap(\.rawBytes)
+    nonisolated private func forward(rawMessages: [[UInt8]]) {
+        guard outputPort != 0, selectedDestination != 0 else { return }
+        guard !rawMessages.isEmpty else { return }
+
+        let bytes = rawMessages.flatMap { $0 }
         var packetBuffer = [UInt8](repeating: 0, count: 1024)
 
         let status: OSStatus = packetBuffer.withUnsafeMutableBytes { rawBuffer in
@@ -450,6 +524,47 @@ final class MIDIPOCViewModel: ObservableObject {
         }
     }
 
+    private func sendLocalControl(enabled: Bool, to destination: MIDIEndpointRef) {
+        guard outputPort != 0, destination != 0 else { return }
+
+        let value: UInt8 = enabled ? 127 : 0
+        send(rawMessages: [[0xB0, 122, value]], to: destination)
+    }
+
+    private func send(rawMessages: [[UInt8]], to destination: MIDIEndpointRef) {
+        guard outputPort != 0, destination != 0 else { return }
+        guard !rawMessages.isEmpty else { return }
+
+        let bytes = rawMessages.flatMap { $0 }
+        var packetBuffer = [UInt8](repeating: 0, count: 1024)
+
+        let status: OSStatus = packetBuffer.withUnsafeMutableBytes { rawBuffer in
+            guard let packetListPointer = rawBuffer.baseAddress?.assumingMemoryBound(to: MIDIPacketList.self) else {
+                return kMIDIUnknownError
+            }
+
+            let port = outputPort
+            let packetPointer = MIDIPacketListInit(packetListPointer)
+
+            return bytes.withUnsafeBufferPointer { bytesPointer in
+                guard let baseAddress = bytesPointer.baseAddress else {
+                    return kMIDIMessageSendErr
+                }
+
+                let nextPacketPointer = MIDIPacketListAdd(packetListPointer, rawBuffer.count, packetPointer, 0, bytesPointer.count, baseAddress)
+                guard nextPacketPointer != UnsafeMutablePointer<MIDIPacket>.init(bitPattern: 0) else {
+                    return kMIDIMessageSendErr
+                }
+
+                return MIDISend(port, destination, packetListPointer)
+            }
+        }
+
+        if status != noErr {
+            appendDebugLog("MIDI send failed: \(status)")
+        }
+    }
+
     nonisolated private func updateLastReceivedEvent(_ text: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -457,6 +572,39 @@ final class MIDIPOCViewModel: ObservableObject {
             lastEventTimestamp = timestampFormatter.string(from: Date())
             appendDebugLog("RX \(text)")
         }
+    }
+
+    nonisolated private func startPlaybackTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: engineQueue)
+        timer.schedule(deadline: .now() + .milliseconds(10), repeating: .milliseconds(10), leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.processPlaybackTick()
+        }
+        playbackTimer = timer
+        timer.resume()
+    }
+
+    nonisolated private func processPlaybackTick() {
+        let now = currentTime()
+        let output = looperEngine.advancePlayback(to: now)
+        if !output.isEmpty {
+            forward(rawMessages: output)
+        }
+
+        publishLooperSnapshot(now)
+    }
+
+    nonisolated private func publishLooperSnapshot(_ now: TimeInterval) {
+        let snapshot = looperEngine.snapshot(at: now)
+
+        Task { @MainActor [weak self] in
+            guard let self, self.looperSnapshot != snapshot else { return }
+            looperSnapshot = snapshot
+        }
+    }
+
+    nonisolated private func currentTime() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
     }
 
     private func appendDebugLog(_ message: String) {
